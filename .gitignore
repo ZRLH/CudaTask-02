@@ -1,0 +1,9 @@
+# Ignore build directories
+
+cmake-build-*/
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.log
+.idea/
