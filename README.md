@@ -7,16 +7,31 @@
 
 - `main.cu`: The developer's draft code, messy with debugging information and temporary comments in Chinese, intended for use during the development process only.
 - `main_public.cu`: A refined version cleaned from `main.cu`, with redundant comments and debugging information removed, suitable for formal code review.
+## Compilation and execution method:
+<pre>
+nvcc  -o  task02  main_public.cu  -Xcompiler  -fopenmp
+./task02
+</pre>
 ******************************************************
 #### Text in Russian:
 ## Описание кода проекта
 
 - `main.cu`: Код разработчика, беспорядочный, содержит отладочную информацию и временные комментарии на китайском языке, предназначен только для использования в процессе разработки.
 - `main_public.cu`: Очищенная версия из `main.cu`, в которой удалены избыточные комментарии и отладочная информация, подходящая для официального просмотра кода.
+## Способ компиляции и запуска:
+<pre>
+nvcc  -o  task02  main_public.cu  -Xcompiler  -fopenmp
+./task02
+</pre>
 ******************************************************
 #### Text in Chinese:
 ## 项目代码说明
 
 - `main.cu`: 本人的开发代码，较为杂乱，包含了调试信息和中文临时注释，仅供开发过程中使用。
 - `main_public.cu`: 本人从 `main.cu` 中精简和清理过来的版本，去除了冗余的注释和调试信息，适合用于正式的代码审阅。
+## 编译运行方式：
+<pre>
+nvcc  -o  task02  main_public.cu  -Xcompiler  -fopenmp
+./task02
+</pre>
 ******************************************************
