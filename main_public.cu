@@ -1,7 +1,6 @@
 //#define RUNNING_MODE -1
 #define RUNNING_MODE 110     //  ** Ultra version **   1.04 sec on my computer with (900L,10it) Modified from the 11th RUNNING_MODE in main.cu (Current file is main_public.cu, not main.cu)
 
-
 #if RUNNING_MODE == 110
 #include <math.h>
 #include <iostream>
@@ -19,7 +18,7 @@
 #define IT_MAX 10
 //#define IT_MAX 100
 #define L 900
-//#define L 390
+//#define L 384
 
 #define nx L
 #define ny L
@@ -149,7 +148,7 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
     // Compute how many elements to load in the first partial round (for alignment)
     int first_round_size = nx % blockDim.x;
     int round_times      = nx / blockDim.x;  // Number of full rounds along x
-    int flag             = 1;
+    bool flag            = true;
 
     __syncthreads();
 
@@ -190,7 +189,7 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
             __syncthreads();
         }
 
-        flag = -1;
+        flag = false;
         ++i_round; // After first_round_size==1, we need two passes
     }
     if (first_round_size == 2) {
@@ -224,7 +223,7 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
             __syncthreads();
         }
 
-        flag = -1;
+        flag = false;
         ++i_round;
     } else if (first_round_size == 0) {
         // Handle when nx is an exact multiple of BLOCK_SIZE
@@ -262,7 +261,7 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
             __syncthreads();
         }
 
-        flag = 1;
+        flag = true;
         i_round = 1;
         first_round_size = 0;
     } else {
@@ -297,7 +296,7 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
             __syncthreads();
         }
 
-        flag = 1;
+        flag = true;
         i_round = 0;
     }
 
@@ -305,7 +304,7 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
 
     // Perform remaining rounds: load, compute, write back for round_times
     for (; i_round < round_times; ++i_round) {
-        if (flag == 1) {
+        if (flag) {
             // Forward pass: load BLOCK_SIZE, compute, write back
             for (int line = 0; line < line_per_block; ++line) {
                 int idx = blockIdx.x * blockDim.x + line;
@@ -329,6 +328,7 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
                         sh_data[line * (BLOCK_SIZE+1) + tid_in_block];
                 __syncthreads();
             }
+            flag = false;
         } else {
             // Reverse pass: symmetrical operations in reverse
             for (int line = 0; line < line_per_block; ++line) {
@@ -353,8 +353,8 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
                         sh_data[line * (BLOCK_SIZE+1) + (BLOCK_SIZE - tid_in_block)];
                 __syncthreads();
             }
+            flag = true;
         }
-        flag = -flag;
     }
 
     // Write each thread's local max error into shared memory, zero out extras
@@ -385,8 +385,8 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
 void print_gpu_info() {
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
-    printf("Shared Mem per Block: %d bytes\n", prop.sharedMemPerBlock);  // 每个 block 限制
-    printf("Shared Mem per SM   : %d bytes\n", prop.sharedMemPerMultiprocessor); // 每个 SM 限制
+    printf("Shared Mem per Block: %d bytes\n", prop.sharedMemPerBlock);  // limit in block
+    printf("Shared Mem per SM   : %d bytes\n", prop.sharedMemPerMultiprocessor); // limit in SM
 }
 
 int main(int argc, char *argv[]) {
@@ -432,7 +432,7 @@ int main(int argc, char *argv[]) {
 
     // Allocating device memory
     CHECK_CUDA_ERROR(cudaMalloc((void **) &d_A, nx * ny * nz * sizeof(double)));
-    CHECK_CUDA_ERROR(cudaMalloc((void **) &d_eps, blocks_z * sizeof(double)));  // 存放每个block内最大值
+    CHECK_CUDA_ERROR(cudaMalloc((void **) &d_eps, blocks_z * sizeof(double)));  // Store the maximum value in each block
 
     printf("Copying data to device (done only once)...\n");
     CHECK_CUDA_ERROR(cudaMemcpy(d_A, a, nx * ny * nz * sizeof(double), cudaMemcpyHostToDevice));

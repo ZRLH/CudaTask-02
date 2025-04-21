@@ -1,4 +1,4 @@
-//#define RUNNING_MODE -1     // 停用
+#define RUNNING_MODE -1     // 停用
 //#define RUNNING_MODE 0      // 过于拉胯, 辣眼睛
 //#define RUNNING_MODE 1
 //#define RUNNING_MODE 2      // 测试 核函数 内的 cub scan 函数
@@ -11,7 +11,7 @@
 //#define RUNNING_MODE 8      // 原子操作版, 用作对比 900*10 => 1.57s
 //#define RUNNING_MODE 9      // thrust 替代 CUB
 //#define RUNNING_MODE 10     // 尝试优化 k 方向        尝试采用 transition     // 原型机已实现！！！  超级快  Ultra级别    1.04秒
-#define RUNNING_MODE 11     // 对 Ultra 级别进行代码级优化  // 阶段性结论：i, j方向计算已经趋于最优解 (可能就是最优解)      易读性为0    表面上算法进行了简化，但是实际上速度并没有一丝加快
+//#define RUNNING_MODE 11     // 对 Ultra 级别进行代码级优化  // 阶段性结论：i, j方向计算已经趋于最优解 (可能就是最优解)      易读性为0    表面上算法进行了简化，但是实际上速度并没有一丝加快
                                 // 目前还剩下 a b 没有优化成两个读取
 // 设置 RUNNING MODE ****************
 
