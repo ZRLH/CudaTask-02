@@ -1,8 +1,8 @@
-#define RUNNING_MODE 110     //  ** Ultra version **   1.04秒  Modified from the 11th RUNNING_MODE in main.cu (Current file is main_public.cu, not main.cu)
+#define RUNNING_MODE 110     //  ** Ultra version **   1.04 sec on my computer with (900L,10it) Modified from the 11th RUNNING_MODE in main.cu (Current file is main_public.cu, not main.cu)
 
 
 
-#if RUNNING_MODE == 110
+#if RUNNING_MODE == 110     
 #include <math.h>
 #include <iostream>
 #include <stdio.h>
@@ -63,8 +63,7 @@ void init(double *a) {
 //>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 
-// 用 CUB 的 BlockScan 替代串行更新的核函数版本   (采用串行计算) (但是不将数据存储在 共享内存中)(每个block中32个线程)
-//  (计算结果正确) (目前最快)
+
 __global__ void compute_i_direction_kernel_32_thread(double *a) {
     int tid_in_block = threadIdx.x;
     int thread_global_id = blockIdx.x * blockDim.x + tid_in_block;
@@ -88,7 +87,6 @@ __global__ void compute_i_direction_kernel_32_thread(double *a) {
     }
 }
 
-// 同理, 仿照 compute_i_direction_kernel_32_thread 写出 compute_j_direction_kernel_32_thread
 __global__ void compute_j_direction_kernel_32_thread(double *a) {
     int tid_in_block = threadIdx.x;     // 由于我们使用 1 维 block, 因此只有 x 方向
     int thread_global_id = blockIdx.x * blockDim.x + tid_in_block;  // 同样, 使用 1 维 grid, 只有 x 方向
@@ -113,7 +111,7 @@ __global__ void compute_j_direction_kernel_32_thread(double *a) {
     }
 }
 
-// 自定义打印 debug
+// print debug
 #define DEBUG_PRINT(info, bIdx, tIdx)                   \
 {                                           \
     if (blockIdx.x == (bIdx) && threadIdx.x == (tIdx))\
@@ -123,18 +121,17 @@ __global__ void compute_j_direction_kernel_32_thread(double *a) {
 
 //$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 //$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
-// 在二分规约方案的基础上，使用并行加载内存的方式      这种情况下，每个 block 的共享内存大小：33
+// shard memory block size per block: 33 * 32 double, the shard block will also for block binary algorithm reduce
 __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
-    //// 为 block_reduce 准备的 shared memory
-    __shared__ double sh_data[(BLOCK_SIZE + 1) * BLOCK_SIZE];  // 33 * 32 个共享内存单位
-    int tid_in_block = threadIdx.x;     // 由于我们使用 1 维 block, 因此只有 x 方向
-    int thread_global_id = blockIdx.x * blockDim.x + tid_in_block;  // 同样, 使用 1 维 grid, 只有 x 方向
+    __shared__ double sh_data[(BLOCK_SIZE + 1) * BLOCK_SIZE];  // 33 * 32 double shared memory
+    int tid_in_block = threadIdx.x;
+    int thread_global_id = blockIdx.x * blockDim.x + tid_in_block;
 
     double tmp;
-    double s_eps = 0.;  // 初始化局部误差
+    double s_eps = 0.;
     double d_al, d_ac, d_ar;  // left  center  right
 
-    // 解码出 i, j
+    // get the i, j
     int ij_total = nx * ny;
 
     // 因为上面 ij_total = nx * ny, 因此应该是 /ny; %ny
