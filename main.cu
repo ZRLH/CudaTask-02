@@ -1,3 +1,4 @@
+#define RUNNING_MODE -1     // 停用
 //#define RUNNING_MODE 0      // 过于拉胯, 辣眼睛
 //#define RUNNING_MODE 1
 //#define RUNNING_MODE 2      // 测试 核函数 内的 cub scan 函数
@@ -9,8 +10,8 @@
                         // warp 版 900*10 => 1.51s
 //#define RUNNING_MODE 8      // 原子操作版, 用作对比 900*10 => 1.57s
 //#define RUNNING_MODE 9      // thrust 替代 CUB
-//#define RUNNING_MODE 10     // 尝试优化 k 方向        尝试采用 transition     // 原型机已实现！！！  超级快  Ultra级别
-#define RUNNING_MODE 11     // 对 Ultra 级别进行代码级优化  // 阶段性结论：i, j方向计算已经趋于最优解 (可能就是最优解)
+//#define RUNNING_MODE 10     // 尝试优化 k 方向        尝试采用 transition     // 原型机已实现！！！  超级快  Ultra级别    1.04秒
+//#define RUNNING_MODE 11     // 对 Ultra 级别进行代码级优化  // 阶段性结论：i, j方向计算已经趋于最优解 (可能就是最优解)          表面上算法进行了简化，但是实际上速度并没有一丝加快
                                 // 目前还剩下 a b 没有优化成两个读取
 // 设置 RUNNING MODE ****************
 
@@ -5732,11 +5733,15 @@ __global__ void compute_j_direction_kernel_32_thread(double *a) {
 //$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 //$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 // 在二分规约方案的基础上，使用并行加载内存的方式      这种情况下，每个 block 的共享内存大小：33
+// 优化前：1.067秒
+// 最大幅度优化性能，代码可读性为 0，仅适合外星人和ChatGPT阅读
+// 运行时间无变化 ... 仅仅大幅度降低了程序易读性 ...    1.067秒  1.068秒
 __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
     //// 为 block_reduce 准备的 shared memory
     __shared__ double sh_data[(BLOCK_SIZE + 1) * BLOCK_SIZE];  // 33 * 32 个共享内存单位
     int tid_in_block = threadIdx.x;     // 由于我们使用 1 维 block, 因此只有 x 方向
-    int thread_global_id = blockIdx.x * blockDim.x + tid_in_block;  // 同样, 使用 1 维 grid, 只有 x 方向
+    int block_Idx_mul_Dim = blockIdx.x * blockDim.x; // 提前计算出 blockIdx.x * blockDim.x
+    int thread_global_id = block_Idx_mul_Dim + tid_in_block;  // 同样, 使用 1 维 grid, 只有 x 方向
 
     double tmp;
     double s_eps = 0.;  // 初始化局部误差
@@ -5745,9 +5750,6 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
     // 解码出 i, j
     int ij_total = nx * ny;
 
-    // 不存在空线程, 空线程同样将充当worker
-//    if (thread_global_id >= ij_total)  // 如果有空线程, 直接返回即可 (在我的电脑上去掉这个代码, 程序运行时间没有任何区别)
-//        return;
 
     // 因为上面 ij_total = nx * ny, 因此应该是 /ny; %ny
     int i = thread_global_id / ny;  // 不正确的 i j 顺序不会影响结果, 但非常影响程序速度！！！
@@ -5770,7 +5772,10 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
     int round_times = nx / 32;  // 总 i_round 数量
     int flag = 1;
 
-
+//    DEBUG_PRINT("A-0", 0,0);
+//    DEBUG_PRINT("A-0", 29,29);
+//    DEBUG_PRINT("A-0", 30,30);
+//    DEBUG_PRINT("A-0", 31,31);
 
     __syncthreads();
 
@@ -5779,14 +5784,6 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
     // 当第一轮搬运1或2个数据时，由于我们独特的计算结构，因此需要做特殊的处理
     // 我们的计算结构： d_al d_ac 将单独存储，然后读取a[i+1]，写入a[i]
     if (first_round_size == 1) {
-
-
-//        DEBUG_PRINT("A-1", 0,0);
-//        DEBUG_PRINT("A-1", 29,29);
-//        DEBUG_PRINT("A-1", 30,30);
-//        DEBUG_PRINT("A-1", 31,31);
-
-
 
         // 第一轮只读一个元素
         // 每个线程记录自己的 d_al d_ac
@@ -5798,14 +5795,16 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
         // 为每条line读取32项
         for (int i_tid = 0; i_tid < line_per_block; ++i_tid) {
             // 解析出i_tid的i和j
-            int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
-            int i_i = i_thread_global_id / ny;
-            int i_j = i_thread_global_id % ny;
-            sh_data[i_tid * 33 + tid_in_block + 1] = a[    i_i * ny * nz + i_j * nz + tid_in_block + 1    ];
+//            int i_thread_global_id = block_Idx_mul_Dim + i_tid;
+//            int i_i = i_thread_global_id / ny;
+//            int i_j = i_thread_global_id % ny;
+//            sh_data[i_tid * 33 + tid_in_block + 1] = a[    i_i * ny * nz + i_j * nz + tid_in_block + 1    ];
+
+//            sh_data[i_tid * 33 + tid_in_block + 1] = a[    ((block_Idx_mul_Dim + i_tid) / ny) * ny * nz + ((block_Idx_mul_Dim + i_tid) % ny) * nz + tid_in_block + 1    ];
+            sh_data[i_tid * 33 + tid_in_block + 1] = a[    (block_Idx_mul_Dim + i_tid) * nz + tid_in_block + 1    ];
 
             __syncthreads();
         }
-        // sh_data[tid_in_block + 1] = a[i * ny * nz + j * nz + tid_in_block];
 
         // 每条线程开始在shared memory中独立处理自己的串行计算
         for (int i_i = 1; i_i < BLOCK_SIZE; ++i_i) {    // 31项，比正常的32项少一项
@@ -5829,10 +5828,12 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
 //                break;
             if (tid_in_block > 0) {
                 // 解析出i_tid的i和j
-                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
-                int i_i = i_thread_global_id / ny;
-                int i_j = i_thread_global_id % ny;
-                a[i_i * ny * nz + i_j * nz + tid_in_block] = sh_data[i_tid * 33 + tid_in_block]; // 第0项已经由于线程返回而不会被读取
+//                int i_thread_global_id = block_Idx_mul_Dim + i_tid;
+//                int i_i = i_thread_global_id / ny;
+//                int i_j = i_thread_global_id % ny;
+
+//                a[((block_Idx_mul_Dim + i_tid) / ny) * ny * nz + ((block_Idx_mul_Dim + i_tid) % ny) * nz + tid_in_block] = sh_data[i_tid * 33 + tid_in_block]; // 第0项已经由于线程返回而不会被读取
+                a[(block_Idx_mul_Dim + i_tid) * nz + tid_in_block] = sh_data[i_tid * 33 + tid_in_block]; // 第0项已经由于线程返回而不会被读取
             }
 
             __syncthreads();
@@ -5844,12 +5845,6 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
     } else if (first_round_size == 2) {
 
 
-//        DEBUG_PRINT("A-2", 0,0);
-//        DEBUG_PRINT("A-2", 29,29);
-//        DEBUG_PRINT("A-2", 30,30);
-//        DEBUG_PRINT("A-2", 31,31);
-
-
 
         d_al = a[i * ny * nz + j * nz + 0]; // 最左侧元素a[0]
         d_ac = a[i * ny * nz + j * nz + 1]; // a[1]
@@ -5858,10 +5853,12 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
         // 为每条line读取32项
         for (int i_tid = 0; i_tid < line_per_block; ++i_tid) {
             // 解析出i_tid的i和j
-            int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
-            int i_i = i_thread_global_id / ny;
-            int i_j = i_thread_global_id % ny;
-            sh_data[i_tid * 33 + tid_in_block + 1] = a[    i_i * ny * nz + i_j * nz + tid_in_block + 2    ];
+//            int i_thread_global_id = block_Idx_mul_Dim + i_tid;
+//            int i_i = i_thread_global_id / ny;
+//            int i_j = i_thread_global_id % ny;
+
+//            sh_data[i_tid * 33 + tid_in_block + 1] = a[    ((block_Idx_mul_Dim + i_tid) / ny) * ny * nz + ((block_Idx_mul_Dim + i_tid) % ny) * nz + tid_in_block + 2    ];
+            sh_data[i_tid * 33 + tid_in_block + 1] = a[    (block_Idx_mul_Dim + i_tid) * nz + tid_in_block + 2    ];
 
             __syncthreads();
         }
@@ -5884,10 +5881,12 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
         for (int i_tid = 0; i_tid < line_per_block; ++i_tid) { // 对block内所有line执行写回
             // 当前情况下第二轮写回 32 项
             // 解析出i_tid的i和j
-            int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
-            int i_i = i_thread_global_id / ny;
-            int i_j = i_thread_global_id % ny;
-            a[    i_i * ny * nz + i_j * nz + tid_in_block + 1    ] = sh_data[i_tid * 33 + tid_in_block]; // 第0项已经由于线程返回而不会被读取
+//            int i_thread_global_id = block_Idx_mul_Dim + i_tid;
+//            int i_i = i_thread_global_id / ny;
+//            int i_j = i_thread_global_id % ny;
+
+//            a[    ((block_Idx_mul_Dim + i_tid) / ny) * ny * nz + ((block_Idx_mul_Dim + i_tid) % ny) * nz + tid_in_block + 1    ] = sh_data[i_tid * 33 + tid_in_block]; // 第0项已经由于线程返回而不会被读取
+            a[    (block_Idx_mul_Dim + i_tid) * nz + tid_in_block + 1    ] = sh_data[i_tid * 33 + tid_in_block]; // 第0项已经由于线程返回而不会被读取
 
             __syncthreads();
         }
@@ -5897,12 +5896,9 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
 
     } else if (first_round_size == 0) {
 
-//        DEBUG_PRINT("A-0", 0,0);
-//        DEBUG_PRINT("A-0", 29,29);
-//        DEBUG_PRINT("A-0", 30,30);
-//        DEBUG_PRINT("A-0", 31,31);
 
-        first_round_size = 32;
+
+//        first_round_size = 32;    // 已经将后面代码中的 first_round_size 替换为了 32，并对 first_round_size - 2 改为了 30
 
         d_al = a[i * ny * nz + j * nz + 0]; // 最左侧元素a[0]
         d_ac = a[i * ny * nz + j * nz + 1]; // a[1]
@@ -5916,12 +5912,15 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
             // 为block内每个line读取 first_round_size - 2 项
 //            if (tid_in_block >= first_round_size - 2)
 //                break;
-            if (tid_in_block < first_round_size - 2) {
+            if (tid_in_block < 30) {
                 // 解析出i_tid的i和j
-                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
-                int i_i = i_thread_global_id / ny;
-                int i_j = i_thread_global_id % ny;
-                sh_data[i_tid * 33 + (first_round_size - 2 - tid_in_block - 1)] = a[i_i * ny * nz + i_j * nz + tid_in_block + 2];
+//                int i_thread_global_id = block_Idx_mul_Dim + i_tid;
+//                int i_i = i_thread_global_id / ny;
+//                int i_j = i_thread_global_id % ny;
+
+//                sh_data[i_tid * 33 + (30 - tid_in_block - 1)] = a[((block_Idx_mul_Dim + i_tid) / ny) * ny * nz + ((block_Idx_mul_Dim + i_tid) % ny) * nz + tid_in_block + 2];
+                sh_data[i_tid * 33 + (30 - tid_in_block - 1)] = a[    (block_Idx_mul_Dim + i_tid) * nz + tid_in_block + 2    ];
+
             }
 
             __syncthreads();
@@ -5931,7 +5930,7 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
 
         // 每条线程开始在shared memory中独立处理自己的串行计算
         // 只计算 first_round_size - 2 项
-        for (int i_i = first_round_size - 2; i_i > 0; --i_i) {    // first_round_size - 2 项
+        for (int i_i = 30; i_i > 0; --i_i) {    // first_round_size - 2 项
             d_ar = sh_data[tid_in_block * 33 + i_i - 1];
             // 计算局部误差
             tmp = (d_al + d_ar) * 0.5;
@@ -5950,13 +5949,16 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
         // 并行地运行line_per_block将解写回内存
         for (int i_tid = 0; i_tid < line_per_block; ++i_tid) { // 对block内所有line执行写回
             // 为block内每个line写回 first_round_size - 2 项
-            if (tid_in_block < first_round_size - 2) {      // 0~3
+            if (tid_in_block < 30) {      // 0~3
                 // 当前情况下第一轮写回 first_round_size - 2 项
                 // 解析出i_tid的i和j
-                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
-                int i_i = i_thread_global_id / ny;
-                int i_j = i_thread_global_id % ny;
-                a[i_i * ny * nz + i_j * nz + tid_in_block + 1] = sh_data[i_tid * 33 + (first_round_size - 2 - tid_in_block)]; // 第0项已经由于线程返回而不会被读取
+//                int i_thread_global_id = block_Idx_mul_Dim + i_tid;
+//                int i_i = (block_Idx_mul_Dim + i_tid) / ny;
+//                int i_j = (block_Idx_mul_Dim + i_tid) % ny;
+
+//                a[((block_Idx_mul_Dim + i_tid) / ny) * ny * nz + ((block_Idx_mul_Dim + i_tid) % ny) * nz + tid_in_block + 1] = sh_data[i_tid * 33 + (30 - tid_in_block)]; // 第0项已经由于线程返回而不会被读取
+                a[    (block_Idx_mul_Dim + i_tid) * nz + tid_in_block + 1    ] = sh_data[i_tid * 33 + (30 - tid_in_block)]; // 第0项已经由于线程返回而不会被读取
+
             }
 
             __syncthreads();
@@ -5964,7 +5966,7 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
 
         flag = 1;
         i_round = 1;
-        first_round_size = 0; // 需要设置回 0
+//        first_round_size = 0; // 需要设置回 0
 
     } else { // first_round_size 为 3 4 5 6...
 
@@ -5987,10 +5989,13 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
 //                break;
             if (tid_in_block < first_round_size - 2) {
                 // 解析出i_tid的i和j
-                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
-                int i_i = i_thread_global_id / ny;
-                int i_j = i_thread_global_id % ny;
-                sh_data[i_tid * 33 + (first_round_size - 2 - tid_in_block - 1)] = a[i_i * ny * nz + i_j * nz + tid_in_block + 2];
+//                int i_thread_global_id = block_Idx_mul_Dim + i_tid;
+//                int i_i = (block_Idx_mul_Dim + i_tid) / ny;
+//                int i_j = (block_Idx_mul_Dim + i_tid) % ny;
+//
+//                sh_data[i_tid * 33 + (first_round_size - 2 - tid_in_block - 1)] = a[((block_Idx_mul_Dim + i_tid) / ny) * ny * nz + ((block_Idx_mul_Dim + i_tid) % ny) * nz + tid_in_block + 2];
+                sh_data[i_tid * 33 + (first_round_size - 2 - tid_in_block - 1)] = a[    (block_Idx_mul_Dim + i_tid) * nz + tid_in_block + 2    ];
+
             }
 
             __syncthreads();
@@ -6022,10 +6027,13 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
             if (tid_in_block < first_round_size - 2) {      // 0~3
                 // 当前情况下第一轮写回 first_round_size - 2 项
                 // 解析出i_tid的i和j
-                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
-                int i_i = i_thread_global_id / ny;
-                int i_j = i_thread_global_id % ny;
-                a[i_i * ny * nz + i_j * nz + tid_in_block + 1] = sh_data[i_tid * 33 + (first_round_size - 2 - tid_in_block)]; // 第0项已经由于线程返回而不会被读取
+//                int i_thread_global_id = block_Idx_mul_Dim + i_tid;
+//                int i_i = (block_Idx_mul_Dim + i_tid) / ny;
+//                int i_j = (block_Idx_mul_Dim + i_tid) % ny;
+
+//                a[((block_Idx_mul_Dim + i_tid) / ny) * ny * nz + ((block_Idx_mul_Dim + i_tid) % ny) * nz + tid_in_block + 1] = sh_data[i_tid * 33 + (first_round_size - 2 - tid_in_block)]; // 第0项已经由于线程返回而不会被读取
+                a[    (block_Idx_mul_Dim + i_tid) * nz + tid_in_block + 1    ] = sh_data[i_tid * 33 + (first_round_size - 2 - tid_in_block)]; // 第0项已经由于线程返回而不会被读取
+
             }
 
             __syncthreads();
@@ -6052,10 +6060,12 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
             // 为每条line读取32项
             for (int i_tid = 0; i_tid < line_per_block; ++i_tid) {
                 // 解析出i_tid的i和j
-                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
-                int i_i = i_thread_global_id / ny;
-                int i_j = i_thread_global_id % ny;
-                sh_data[i_tid * 33 + tid_in_block + 1] = a[i_i * ny * nz + i_j * nz + i_round * 32 + first_round_size + tid_in_block];
+//                int i_thread_global_id = block_Idx_mul_Dim + i_tid;
+//                int i_i = (block_Idx_mul_Dim + i_tid) / ny;
+//                int i_j = (block_Idx_mul_Dim + i_tid) % ny;
+//
+//                sh_data[i_tid * 33 + tid_in_block + 1] = a[((block_Idx_mul_Dim + i_tid) / ny) * ny * nz + ((block_Idx_mul_Dim + i_tid) % ny) * nz + i_round * 32 + first_round_size + tid_in_block];
+                sh_data[i_tid * 33 + tid_in_block + 1] = a[    (block_Idx_mul_Dim + i_tid) * nz + i_round * 32 + first_round_size + tid_in_block    ];
 
                 __syncthreads();
             }
@@ -6078,14 +6088,18 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
             for (int i_tid = 0; i_tid < line_per_block; ++i_tid) { // 对block内所有line执行写回
                 // 当前情况下第二轮写回 32 项
                 // 解析出i_tid的i和j
-                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
-                int i_i = i_thread_global_id / ny;
-                int i_j = i_thread_global_id % ny;
-                a[i_i * ny * nz + i_j * nz + i_round * 32 + first_round_size + tid_in_block - 1] = sh_data[i_tid * 33 + tid_in_block]; // 第0项已经由于线程返回而不会被读取
+//                int i_thread_global_id = block_Idx_mul_Dim + i_tid;
+//                int i_i = (block_Idx_mul_Dim + i_tid) / ny;
+//                int i_j = (block_Idx_mul_Dim + i_tid) % ny;
+
+//                a[((block_Idx_mul_Dim + i_tid) / ny) * ny * nz + ((block_Idx_mul_Dim + i_tid) % ny) * nz + i_round * 32 + first_round_size + tid_in_block - 1] = sh_data[i_tid * 33 + tid_in_block]; // 第0项已经由于线程返回而不会被读取
+                a[    (block_Idx_mul_Dim + i_tid) * nz + i_round * 32 + first_round_size + tid_in_block - 1    ] = sh_data[i_tid * 33 + tid_in_block]; // 第0项已经由于线程返回而不会被读取
 
                 __syncthreads();
             }                                               //*** 这段代码没问题
 
+
+            flag = -1;
         } else {         /// flag == -1   ==> 逆向
             // 对称情形
 
@@ -6093,10 +6107,12 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
             // 为每条line读取32项
             for (int i_tid = 0; i_tid < line_per_block; ++i_tid) {  // line 的读取顺序不重要，不需要改变
                 // 解析出i_tid的i和j
-                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
-                int i_i = i_thread_global_id / ny;
-                int i_j = i_thread_global_id % ny;
-                sh_data[i_tid * 33 + (BLOCK_SIZE - tid_in_block - 1)] = a[i_i * ny * nz + i_j * nz + i_round * 32 + first_round_size + tid_in_block]; // 我们让右侧a的idx保持不变
+//                int i_thread_global_id = block_Idx_mul_Dim + i_tid;
+//                int i_i = (block_Idx_mul_Dim + i_tid) / ny;
+//                int i_j = (block_Idx_mul_Dim + i_tid) % ny;
+
+//                sh_data[i_tid * 33 + (BLOCK_SIZE - tid_in_block - 1)] = a[((block_Idx_mul_Dim + i_tid) / ny) * ny * nz + ((block_Idx_mul_Dim + i_tid) % ny) * nz + i_round * 32 + first_round_size + tid_in_block]; // 我们让右侧a的idx保持不变
+                sh_data[i_tid * 33 + (BLOCK_SIZE - tid_in_block - 1)] = a[    (block_Idx_mul_Dim + i_tid) * nz + i_round * 32 + first_round_size + tid_in_block    ]; // 我们让右侧a的idx保持不变
 
                 __syncthreads();
             }
@@ -6120,16 +6136,20 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
             for (int i_tid = 0; i_tid < line_per_block; ++i_tid) { // 对block内所有line执行写回，line 的读取顺序不重要，不需要改变
                 // 写回 32 项
                 // 解析出i_tid的i和j
-                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
-                int i_i = i_thread_global_id / ny;
-                int i_j = i_thread_global_id % ny;
-                a[    i_i * ny * nz + i_j * nz + i_round * 32 + first_round_size + tid_in_block - 1    ] = sh_data[i_tid * 33 + (BLOCK_SIZE - tid_in_block )]; // 左侧的a的idx保持不变
+//                int i_thread_global_id = block_Idx_mul_Dim + i_tid;
+//                int i_i = (block_Idx_mul_Dim + i_tid) / ny;
+//                int i_j = (block_Idx_mul_Dim + i_tid) % ny;
+
+//                a[    ((block_Idx_mul_Dim + i_tid) / ny) * ny * nz + ((block_Idx_mul_Dim + i_tid) % ny) * nz + i_round * 32 + first_round_size + tid_in_block - 1    ] = sh_data[i_tid * 33 + (BLOCK_SIZE - tid_in_block )]; // 左侧的a的idx保持不变
+                a[    (block_Idx_mul_Dim + i_tid) * nz + i_round * 32 + first_round_size + tid_in_block - 1    ] = sh_data[i_tid * 33 + (BLOCK_SIZE - tid_in_block )]; // 左侧的a的idx保持不变
 
                 __syncthreads();
             }                                               //*** 这段代码没问题
 
+
+            flag = 1;
         }
-        flag *= -1;
+//        flag *= -1;   // 显然，直接赋值比这更快
     }
     //!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     //!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -6162,6 +6182,447 @@ __global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
     if (tid_in_block == 0) // 写回block_reduce结果
         d_eps[blockIdx.x] = sh_data[0];
 }
+
+
+
+
+
+
+
+// 副本 并行加载内存算法
+//__global__ void compute_k_direction_kernel_32_thread(double *a, double *d_eps) {
+//    //// 为 block_reduce 准备的 shared memory
+//    __shared__ double sh_data[(BLOCK_SIZE + 1) * BLOCK_SIZE];  // 33 * 32 个共享内存单位
+//    int tid_in_block = threadIdx.x;     // 由于我们使用 1 维 block, 因此只有 x 方向
+//    int thread_global_id = blockIdx.x * blockDim.x + tid_in_block;  // 同样, 使用 1 维 grid, 只有 x 方向
+//
+//    double tmp;
+//    double s_eps = 0.;  // 初始化局部误差
+//    double d_al, d_ac, d_ar;  // left  center  right
+//
+//    // 解码出 i, j
+//    int ij_total = nx * ny;
+//
+//    // 不存在空线程, 空线程同样将充当worker
+////    if (thread_global_id >= ij_total)  // 如果有空线程, 直接返回即可 (在我的电脑上去掉这个代码, 程序运行时间没有任何区别)
+////        return;
+//
+//    // 因为上面 ij_total = nx * ny, 因此应该是 /ny; %ny
+//    int i = thread_global_id / ny;  // 不正确的 i j 顺序不会影响结果, 但非常影响程序速度！！！
+//    int j = thread_global_id % ny;  // 不正确的 i j 顺序不会影响结果, 但非常影响程序速度！！！
+//
+//
+//
+//    // 获取当前block中的line数量
+//    int line_per_block;
+//    if (blockIdx.x == ij_total / 32) {
+//        line_per_block = ij_total % 32; // 最后一个block中line的数量为 total % 32
+//    } else {
+//        line_per_block = 32; //  其他block中line数量为 32
+//    }
+//
+//    // 同一个block中全部线程协同将block内所有的line中的32项数据导入进shared memory中
+//    // 不过，对于第一或者第二项，需要单独考虑
+//    // 首先，我们计算出一条线上的总长度nx除以32的余数：这是第一轮对于一条line而言搬运的数据量，之后的数据将能被对齐
+//    int first_round_size = nx % 32;
+//    int round_times = nx / 32;  // 总 i_round 数量
+//    int flag = 1;
+//
+//
+//
+//    __syncthreads();
+//
+//    int i_round = 0;    // 当前的完整轮 idx
+//
+//    // 当第一轮搬运1或2个数据时，由于我们独特的计算结构，因此需要做特殊的处理
+//    // 我们的计算结构： d_al d_ac 将单独存储，然后读取a[i+1]，写入a[i]
+//    if (first_round_size == 1) {
+//
+//
+////        DEBUG_PRINT("A-1", 0,0);
+////        DEBUG_PRINT("A-1", 29,29);
+////        DEBUG_PRINT("A-1", 30,30);
+////        DEBUG_PRINT("A-1", 31,31);
+//
+//
+//
+//        // 第一轮只读一个元素
+//        // 每个线程记录自己的 d_al d_ac
+//        // 在这种情况下，(ny,nz) 将会是线程的标识符
+//        d_al = a[i * ny * nz + j * nz + 0]; // 最左侧元素a[0]
+//        d_ac = a[i * ny * nz + j * nz + 1]; // a[1]
+//
+//        // 并行地运行line_per_block轮以便于为block内每条线都分配好各自的共享内存
+//        // 为每条line读取32项
+//        for (int i_tid = 0; i_tid < line_per_block; ++i_tid) {
+//            // 解析出i_tid的i和j
+//            int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
+//            int i_i = i_thread_global_id / ny;
+//            int i_j = i_thread_global_id % ny;
+//            sh_data[i_tid * 33 + tid_in_block + 1] = a[    i_i * ny * nz + i_j * nz + tid_in_block + 1    ];
+//
+//            __syncthreads();
+//        }
+//        // sh_data[tid_in_block + 1] = a[i * ny * nz + j * nz + tid_in_block];
+//
+//        // 每条线程开始在shared memory中独立处理自己的串行计算
+//        for (int i_i = 1; i_i < BLOCK_SIZE; ++i_i) {    // 31项，比正常的32项少一项
+//            d_ar = sh_data[tid_in_block * 33 + i_i + 1]; // 此时 flag 等于 1
+//            // 计算局部误差
+//            tmp = (d_al + d_ar) * 0.5;
+//            // 写回shared memory
+//            sh_data[tid_in_block * 33 + i_i] = tmp;
+//            s_eps = MAX(s_eps, fabs(d_ac - tmp));
+//
+//            // 更新 d_al 和 d_ac
+//            d_al = tmp;
+//            d_ac = d_ar;
+//        }
+//
+//        // 并行地运行line_per_block将解写回内存
+//        for (int i_tid = 0; i_tid < line_per_block; ++i_tid) { // 对block内所有line执行写回
+//            // 当前情况下第二轮只需写回 31 项，而不是 32 项
+//            // 由于我们不需要写回的是sh_data[0]，因此 tid_in_block 休息
+////            if (tid_in_block == 0)
+////                break;
+//            if (tid_in_block > 0) {
+//                // 解析出i_tid的i和j
+//                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
+//                int i_i = i_thread_global_id / ny;
+//                int i_j = i_thread_global_id % ny;
+//                a[i_i * ny * nz + i_j * nz + tid_in_block] = sh_data[i_tid * 33 + tid_in_block]; // 第0项已经由于线程返回而不会被读取
+//            }
+//
+//            __syncthreads();
+//        }
+//
+//        flag = -1;
+//        ++i_round; // 首先，在这种情况下最初轮次需要两轮
+//
+//    } else if (first_round_size == 2) {
+//
+//
+////        DEBUG_PRINT("A-2", 0,0);
+////        DEBUG_PRINT("A-2", 29,29);
+////        DEBUG_PRINT("A-2", 30,30);
+////        DEBUG_PRINT("A-2", 31,31);
+//
+//
+//
+//        d_al = a[i * ny * nz + j * nz + 0]; // 最左侧元素a[0]
+//        d_ac = a[i * ny * nz + j * nz + 1]; // a[1]
+//
+//        // 并行地运行line_per_block轮以便于为block内每条线都分配好各自的共享内存
+//        // 为每条line读取32项
+//        for (int i_tid = 0; i_tid < line_per_block; ++i_tid) {
+//            // 解析出i_tid的i和j
+//            int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
+//            int i_i = i_thread_global_id / ny;
+//            int i_j = i_thread_global_id % ny;
+//            sh_data[i_tid * 33 + tid_in_block + 1] = a[    i_i * ny * nz + i_j * nz + tid_in_block + 2    ];
+//
+//            __syncthreads();
+//        }
+//
+//        // 每条线程开始在shared memory中独立处理自己的串行计算
+//        for (int i_i = 0; i_i < BLOCK_SIZE; ++i_i) {    // 32项，正常
+//            d_ar = sh_data[tid_in_block * 33 + i_i + 1]; // 此时 flag 等于 1
+//            // 计算局部误差
+//            tmp = (d_al + d_ar) * 0.5;
+//            // 写回shared memory
+//            sh_data[tid_in_block * 33 + i_i] = tmp;
+//            s_eps = MAX(s_eps, fabs(d_ac - tmp));
+//
+//            // 更新 d_al 和 d_ac
+//            d_al = tmp;
+//            d_ac = d_ar;
+//        }
+//
+//        // 并行地运行line_per_block将解写回内存
+//        for (int i_tid = 0; i_tid < line_per_block; ++i_tid) { // 对block内所有line执行写回
+//            // 当前情况下第二轮写回 32 项
+//            // 解析出i_tid的i和j
+//            int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
+//            int i_i = i_thread_global_id / ny;
+//            int i_j = i_thread_global_id % ny;
+//            a[    i_i * ny * nz + i_j * nz + tid_in_block + 1    ] = sh_data[i_tid * 33 + tid_in_block]; // 第0项已经由于线程返回而不会被读取
+//
+//            __syncthreads();
+//        }
+//
+//        flag = -1;
+//        ++i_round; // 首先，在这种情况下最初轮次需要两轮
+//
+//    } else if (first_round_size == 0) {
+//
+////        DEBUG_PRINT("A-0", 0,0);
+////        DEBUG_PRINT("A-0", 29,29);
+////        DEBUG_PRINT("A-0", 30,30);
+////        DEBUG_PRINT("A-0", 31,31);
+//
+//        first_round_size = 32;
+//
+//        d_al = a[i * ny * nz + j * nz + 0]; // 最左侧元素a[0]
+//        d_ac = a[i * ny * nz + j * nz + 1]; // a[1]
+//
+//        // first_round_size - 2
+//
+//        // 并行地运行line_per_block轮以便于为block内每条线都分配好各自的共享内存
+//        // 为每条line读取 first_round_size - 2 项
+////        for (int i_tid = first_round_size - 2; i_tid > 0; --i_tid) {
+//        for (int i_tid = 0; i_tid < line_per_block; ++i_tid) {
+//            // 为block内每个line读取 first_round_size - 2 项
+////            if (tid_in_block >= first_round_size - 2)
+////                break;
+//            if (tid_in_block < first_round_size - 2) {
+//                // 解析出i_tid的i和j
+//                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
+//                int i_i = i_thread_global_id / ny;
+//                int i_j = i_thread_global_id % ny;
+//                sh_data[i_tid * 33 + (first_round_size - 2 - tid_in_block - 1)] = a[i_i * ny * nz + i_j * nz + tid_in_block + 2];
+//            }
+//
+//            __syncthreads();
+//        }                                                   //*** 这段代码没问题
+//
+//
+//
+//        // 每条线程开始在shared memory中独立处理自己的串行计算
+//        // 只计算 first_round_size - 2 项
+//        for (int i_i = first_round_size - 2; i_i > 0; --i_i) {    // first_round_size - 2 项
+//            d_ar = sh_data[tid_in_block * 33 + i_i - 1];
+//            // 计算局部误差
+//            tmp = (d_al + d_ar) * 0.5;
+//            // 写回shared memory
+//            sh_data[tid_in_block * 33 + i_i] = tmp;
+//            s_eps = MAX(s_eps, fabs(d_ac - tmp));
+//
+//            // 更新 d_al 和 d_ac
+//            d_al = tmp;
+//            d_ac = d_ar;
+//        }                                                   //*** 这段代码没问题
+//
+//
+//
+//
+//        // 并行地运行line_per_block将解写回内存
+//        for (int i_tid = 0; i_tid < line_per_block; ++i_tid) { // 对block内所有line执行写回
+//            // 为block内每个line写回 first_round_size - 2 项
+//            if (tid_in_block < first_round_size - 2) {      // 0~3
+//                // 当前情况下第一轮写回 first_round_size - 2 项
+//                // 解析出i_tid的i和j
+//                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
+//                int i_i = i_thread_global_id / ny;
+//                int i_j = i_thread_global_id % ny;
+//                a[i_i * ny * nz + i_j * nz + tid_in_block + 1] = sh_data[i_tid * 33 + (first_round_size - 2 - tid_in_block)]; // 第0项已经由于线程返回而不会被读取
+//            }
+//
+//            __syncthreads();
+//        }
+//
+//        flag = 1;
+//        i_round = 1;
+//        first_round_size = 0; // 需要设置回 0
+//
+//    } else { // first_round_size 为 3 4 5 6...
+//
+////        DEBUG_PRINT("A-3", 0,0);
+////        DEBUG_PRINT("A-3", 29,29);
+////        DEBUG_PRINT("A-3", 30,30);
+////        DEBUG_PRINT("A-3", 31,31);
+//
+//        d_al = a[i * ny * nz + j * nz + 0]; // 最左侧元素a[0]
+//        d_ac = a[i * ny * nz + j * nz + 1]; // a[1]
+//
+//        // first_round_size - 2
+//
+//        // 并行地运行line_per_block轮以便于为block内每条线都分配好各自的共享内存
+//        // 为每条line读取 first_round_size - 2 项
+////        for (int i_tid = first_round_size - 2; i_tid > 0; --i_tid) {
+//        for (int i_tid = 0; i_tid < line_per_block; ++i_tid) {
+//            // 为block内每个line读取 first_round_size - 2 项
+////            if (tid_in_block >= first_round_size - 2)
+////                break;
+//            if (tid_in_block < first_round_size - 2) {
+//                // 解析出i_tid的i和j
+//                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
+//                int i_i = i_thread_global_id / ny;
+//                int i_j = i_thread_global_id % ny;
+//                sh_data[i_tid * 33 + (first_round_size - 2 - tid_in_block - 1)] = a[i_i * ny * nz + i_j * nz + tid_in_block + 2];
+//            }
+//
+//            __syncthreads();
+//        }                                                   //*** 这段代码没问题
+//
+//
+//
+//        // 每条线程开始在shared memory中独立处理自己的串行计算
+//        // 只计算 first_round_size - 2 项
+//        for (int i_i = first_round_size - 2; i_i > 0; --i_i) {    // first_round_size - 2 项
+//            d_ar = sh_data[tid_in_block * 33 + i_i - 1];
+//            // 计算局部误差
+//            tmp = (d_al + d_ar) * 0.5;
+//            // 写回shared memory
+//            sh_data[tid_in_block * 33 + i_i] = tmp;
+//            s_eps = MAX(s_eps, fabs(d_ac - tmp));
+//
+//            // 更新 d_al 和 d_ac
+//            d_al = tmp;
+//            d_ac = d_ar;
+//        }                                                   //*** 这段代码没问题
+//
+//
+//
+//
+//        // 并行地运行line_per_block将解写回内存
+//        for (int i_tid = 0; i_tid < line_per_block; ++i_tid) { // 对block内所有line执行写回
+//            // 为block内每个line写回 first_round_size - 2 项
+//            if (tid_in_block < first_round_size - 2) {      // 0~3
+//                // 当前情况下第一轮写回 first_round_size - 2 项
+//                // 解析出i_tid的i和j
+//                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
+//                int i_i = i_thread_global_id / ny;
+//                int i_j = i_thread_global_id % ny;
+//                a[i_i * ny * nz + i_j * nz + tid_in_block + 1] = sh_data[i_tid * 33 + (first_round_size - 2 - tid_in_block)]; // 第0项已经由于线程返回而不会被读取
+//            }
+//
+//            __syncthreads();
+//        }
+//
+//        flag = 1;
+//        i_round = 0;// 在这种情况下最初轮次需要一轮，因此不需要改变 i_round 值
+//    }                                                       //*** 这段代码没问题
+//
+//    __syncthreads();
+//
+//
+//
+//    //!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+//    //!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+//    // 迭代开始
+//    // 然后进行 round_times 轮迭代
+//    // 此时 d_al  d_ac 已经准备就绪
+//    // 在每一轮中读取 32 项，写入 32 项
+//    // 1. 载入shared memory; 2. 按照方向计算; 3. 数据写回全局内存
+//    for ( ; i_round < round_times; ++i_round) {
+//        if (flag == 1) {        /// flag = 1 ==> 正向
+//            // 并行地运行line_per_block轮以便于为block内每条线都分配好各自的共享内存
+//            // 为每条line读取32项
+//            for (int i_tid = 0; i_tid < line_per_block; ++i_tid) {
+//                // 解析出i_tid的i和j
+//                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
+//                int i_i = i_thread_global_id / ny;
+//                int i_j = i_thread_global_id % ny;
+//                sh_data[i_tid * 33 + tid_in_block + 1] = a[i_i * ny * nz + i_j * nz + i_round * 32 + first_round_size + tid_in_block];
+//
+//                __syncthreads();
+//            }
+//
+//            // 每条线程在shared memory中独立处理自己的串行计算
+//            for (int i_i = 0; i_i < BLOCK_SIZE; ++i_i) {    // 32项，正常
+//                d_ar = sh_data[tid_in_block * 33 + i_i + 1]; // 此时 flag 等于 1
+//                // 计算局部误差
+//                tmp = (d_al + d_ar) * 0.5;
+//                // 写回shared memory
+//                sh_data[tid_in_block * 33 + i_i] = tmp;
+//                s_eps = MAX(s_eps, fabs(d_ac - tmp));
+//
+//                // 更新 d_al 和 d_ac
+//                d_al = tmp;
+//                d_ac = d_ar;
+//            }
+//
+//            // 并行地运行line_per_block将解写回内存
+//            for (int i_tid = 0; i_tid < line_per_block; ++i_tid) { // 对block内所有line执行写回
+//                // 当前情况下第二轮写回 32 项
+//                // 解析出i_tid的i和j
+//                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
+//                int i_i = i_thread_global_id / ny;
+//                int i_j = i_thread_global_id % ny;
+//                a[i_i * ny * nz + i_j * nz + i_round * 32 + first_round_size + tid_in_block - 1] = sh_data[i_tid * 33 + tid_in_block]; // 第0项已经由于线程返回而不会被读取
+//
+//                __syncthreads();
+//            }                                               //*** 这段代码没问题
+//
+//        } else {         /// flag == -1   ==> 逆向
+//            // 对称情形
+//
+//            // 并行地运行line_per_block轮以便于为block内每条线都分配好各自的共享内存
+//            // 为每条line读取32项
+//            for (int i_tid = 0; i_tid < line_per_block; ++i_tid) {  // line 的读取顺序不重要，不需要改变
+//                // 解析出i_tid的i和j
+//                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
+//                int i_i = i_thread_global_id / ny;
+//                int i_j = i_thread_global_id % ny;
+//                sh_data[i_tid * 33 + (BLOCK_SIZE - tid_in_block - 1)] = a[i_i * ny * nz + i_j * nz + i_round * 32 + first_round_size + tid_in_block]; // 我们让右侧a的idx保持不变
+//
+//                __syncthreads();
+//            }
+//
+//            // 每条线程开始在shared memory中独立处理自己的串行计算
+//            // 只计算 first_round_size - 2 项
+//            for (int i_i = BLOCK_SIZE; i_i > 0; --i_i) {    // 32 项，存进内存的作为基准
+//                d_ar = sh_data[tid_in_block * 33 + i_i - 1]; // 此时 flag 等于 1
+//                // 计算局部误差
+//                tmp = (d_al + d_ar) * 0.5;
+//                // 写回shared memory
+//                sh_data[tid_in_block * 33 + i_i] = tmp;
+//                s_eps = MAX(s_eps, fabs(d_ac - tmp));
+//
+//                // 更新 d_al 和 d_ac
+//                d_al = tmp;
+//                d_ac = d_ar;
+//            }
+//
+//            // 并行地运行line_per_block将解写回内存
+//            for (int i_tid = 0; i_tid < line_per_block; ++i_tid) { // 对block内所有line执行写回，line 的读取顺序不重要，不需要改变
+//                // 写回 32 项
+//                // 解析出i_tid的i和j
+//                int i_thread_global_id = blockIdx.x * blockDim.x + i_tid;
+//                int i_i = i_thread_global_id / ny;
+//                int i_j = i_thread_global_id % ny;
+//                a[    i_i * ny * nz + i_j * nz + i_round * 32 + first_round_size + tid_in_block - 1    ] = sh_data[i_tid * 33 + (BLOCK_SIZE - tid_in_block )]; // 左侧的a的idx保持不变
+//
+//                __syncthreads();
+//            }                                               //*** 这段代码没问题
+//
+//        }
+//        flag *= -1;
+//    }
+//    //!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+//    //!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+//
+//    /// 到此为止，共享内存作为计算的中间媒介的作用已经结束了
+//    //！而我们已经将所需的计算结果存储进了 a[] 全局内存中，因此共享内存现在可以退化成一个比之前大很多倍(32*33 vs 32)，但仅仅执行之前的功能的共享内存
+//    // 首先将各个线程的 s_eps 写入共享内存
+//
+//    if (thread_global_id >= ij_total)  // 如果线程大于维数，则将误差设置为 0.
+//        sh_data[tid_in_block] = 0.;
+//    else
+//        sh_data[tid_in_block] = s_eps; // 共 32 项: 0~32
+//
+////    sh_data[tid_in_block] = s_eps;    // 由于在前面的串行计算过程中， >- ij_total 的线程也执行了计算，因此 s_eps 不可信
+//    __syncthreads();
+//
+//    // 使用 二分 块内规约
+//    // 将局部误差存储到全局内存中去   // 原子操作性能较低
+//    // 太慢, 我们将其改为 1. block 内规约(block_reduce); 2. 全局内存内规约(global_reduce)
+//    //atomicMax((unsigned long long int *) d_eps, (unsigned long long)__double_as_longlong(s_eps)); // 一种特殊技巧, 但仅限于非负浮点数
+//    // (这里我们使用 лекция 上讲的 вариант 4)
+//    // 首先我们知道做 block_reduce 需要用到shared memory
+//    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {     // blockDim = 32; // blockDim 必须是 2 的倍数！！！
+//        if (tid_in_block < s)
+//            sh_data[tid_in_block] = MAX(sh_data[tid_in_block], sh_data[tid_in_block + s]);
+//        __syncthreads();
+//    }
+//
+//    // 不仅仅是需要共享内存, 而且还需要block总数数量的额外全局内存, 用来存放每一个block内的局部规约值(global_reduce)
+//    if (tid_in_block == 0) // 写回block_reduce结果
+//        d_eps[blockIdx.x] = sh_data[0];
+//}
+
+
+
 //$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 //$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
 #else

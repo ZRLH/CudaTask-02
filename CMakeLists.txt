@@ -16,7 +16,6 @@
 #set(CMAKE_CUDA_STANDARD 14)
 #set(CMAKE_CUDA_ARCHITECTURES 86)
 #
-## 設定 include 和 lib，現在路徑無中文
 #include_directories("E:/cuda_manual/include")
 #link_directories("E:/cuda_manual/lib/x64")
 #
@@ -36,7 +35,9 @@ set(CMAKE_CUDA_ARCHITECTURES 86)
 include_directories("E:/cuda_manual/include")
 link_directories("E:/cuda_manual/lib/x64")
 
-add_executable(cuda_test main.cu)
+add_executable(cuda_test main.cu
+        main_public.cu
+        main_public_private.cu)
 
 target_link_libraries(cuda_test cudart)
 

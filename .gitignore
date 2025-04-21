@@ -9,3 +9,4 @@ cmake-build-*/
 .idea/
 main_1 (已损毁).cu
 main - (存档).cu
+main_public_private.cu
